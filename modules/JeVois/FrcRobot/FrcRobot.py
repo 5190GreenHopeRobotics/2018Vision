@@ -1,64 +1,71 @@
 import libjevois as jevois
 import cv2
 import numpy
-import time
 import json
-
-# TODO: Adjust output format to hsv to see if that shows up on dashboard
 
 class FrcRobot:
 
-    # yellow objects hsv range
-    lower_yellow = numpy.array([20,200,100])
-    upper_yellow = numpy.array([40,255,255])
+    # cubes
+    class Cube:
+        def __init__(self):
+            self.track = 0
+            self.angle = 0
+            self.distance = 0
+            self.x = 0
+            self.y = 0
+            self.ct = None
 
-    # serial json when no objects are tracked
-    no_track_pixels = {"Track" : 0, "Angle" : 0, "Range" : 0}
-    no_track_json_pixels = json.dumps(no_track_pixels)
-
-    actualDimension = 13.0
-    actualDistance = 60
-    pixelDimension = 160
-    focalLength = pixelDimension * actualDistance / actualDimension
-
-    # reliability
-    flakiness = 0
-    last_cube = {"Track" : 0, "Angle" : 0, "Range" : 0}
-    max_flakiness = 2
-
-    minArea = 2000
-    maxArea = 120000
-    minAspectRatio = 0.7
-    maxAspectRatio = 1.4
-    minExtent = 0.6
+        def toJson(self):
+            pixels = {"Track" : 0, "Angle" : 0, "Range" : 0}
+            if (self.track == 1):
+                pixels = {"Track" : 1, "Angle" : int(numpy.degrees(self.angle)), "Range" : int(self.distance)}
+            return json.dumps(pixels)
 
     # ###################################################################################################
     ## Constructor
     def __init__(self):
-        self.height = 0
-        self.width = 0
+        # yellow objects hsv range
+        self.lower_yellow = numpy.array([20,200,100])
+        self.upper_yellow = numpy.array([40,255,255])
 
-    def processNoUSB(self, inframe):
-        src = inframe.getCvBGR()
-        cube, dst = self.find_cube(src)
-        jevois.sendSerial(cube)
+        # all distance dimensions are in inches
+        self.cameraDisplacement = 11.25
+        self.actualDimension = 13.0
+        self.actualDistance = 60
+        self.pixelDimension = 160
+        self.focalLength = self.pixelDimension * self.actualDistance / self.actualDimension
 
-    def process(self, inframe, outframe):
-        src = inframe.getCvBGR()
-        cube, dst = self.find_cube(src)
-        jevois.sendSerial(cube)
-        outframe.sendCvBGR(dst)
+        self.minArea = 2000
+        self.maxArea = 120000
+        self.minAspectRatio = 0.7
+        self.maxAspectRatio = 1.4
+        self.minExtent = 0.6
 
-    def find_cube(self, src):
+        self.timer = jevois.Timer("FrcRobot", 100, jevois.LOG_INFO)
+
+    # ###################################################################################################
+    ## Load camera calibration from JeVois share directory
+    def loadCameraCalibration(self, w, h):
+        cpf = "/jevois/share/camera/calibration{}x{}.yaml".format(w, h)
+        fs = cv2.FileStorage(cpf, cv2.FILE_STORAGE_READ)
+        if (fs.isOpened()):
+            self.camMatrix = fs.getNode("camera_matrix").mat()
+            self.distCoeffs = fs.getNode("distortion_coefficients").mat()
+            jevois.LINFO("Loaded camera calibration from {}".format(cpf))
+        else:
+            jevois.LFATAL("Failed to read camera parameters from file [{}]".format(cpf))
+
+    # ###################################################################################################
+    ## Detect objects within our HSV range
+    def detect(self, src, outimg = None):
         cubes = []
-        cube_angles = []
-        self.height, self.width, _ = src.shape
+        cube_distances = []
+        height, width, _ = src.shape
 
         hsv = cv2.cvtColor(src, cv2.COLOR_BGR2HSV)
         mask = cv2.inRange(hsv, self.lower_yellow, self.upper_yellow)
         yellow = cv2.bitwise_and(src, src, mask = mask)
         gray = cv2.cvtColor(yellow, cv2.COLOR_BGR2GRAY)
-        # blur = cv2.blur(yellow, (5, 5))
         blur = cv2.GaussianBlur(gray, (5, 5), 0)
         fltr = cv2.bilateralFilter(blur, 1, 10, 100)
         canny  = cv2.Canny(fltr, 10, 100)
@@ -70,59 +77,99 @@ class FrcRobot:
             if area > self.minArea and area < self.maxArea:
                 # contour properties
                 x,y,w,h = cv2.boundingRect(ct)
-                rect = cv2.minAreaRect(ct)
                 extent = float(cv2.contourArea(ct)) / (w*h)
                 aspect_ratio = float(w)/h
 
                 if (aspect_ratio < self.maxAspectRatio and aspect_ratio > self.minAspectRatio): # and extent > self.minExtent):
                     M = cv2.moments(ct)
+                    # location of the cube in pixels
                     cX = int(M["m10"] / M["m00"])
                     cY = int(M["m01"] / M["m00"])
+
+                    # angle and distance from camera (angles in radians)
+                    cA = numpy.arctan2(cX - width / 2, self.focalLength)
                     cD = self.distance(h)
-                    cA = numpy.degrees(numpy.arctan2(cX - self.width / 2, self.focalLength))
 
-                    pixels = {"Track" : 1, "Angle" : cA, "Range" : cD}
-                    json_pixels = json.dumps(pixels)
-                    cubes.append(json_pixels)
-                    cube_angles.append(cA)
+                    # angle and distance after accounting for camera displacement (angles in radians)
+                    cA2 = numpy.arctan2(cD * numpy.sin(cA) + self.cameraDisplacement, cD * numpy.cos(cA))
+                    cD2 = cD * numpy.cos(cA) / numpy.cos(cA2)
 
-                    box = cv2.boxPoints(rect)
-                    box = numpy.int0(box)
-                    cv2.drawContours(src, [box], 0, (0, 0, 255), 2)
-                    cv2.putText(src, str(cD), (cX, cY), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 3)
+                    cube = self.Cube()
+                    cube.track = 1
+                    cube.angle = cA2
+                    cube.range = cD2
+                    cube.x = cX
+                    cube.y = cY
+                    cube.ct = ct
+                    cubes.append(cube)
+                    cube_distances.append(cD2)
 
-        if len(cube_angles) > 0:
-            argmin = numpy.argmin(cube_angles)
-            cube = cubes[argmin]
-            self.flakiness = 0
-            self.last_cube = cube
-            return cube, src
+        if len(cube_distances) > 0:
+            cube = cubes[numpy.argmin(cube_distances)]
+            self.printOnImage(outimg, cube, width, height)
+            return cube
         else:
-            self.flakiness = self.flakiness + 1
-            if (self.flakiness < self.max_flakiness):
-                return self.last_cube, src
-            else:
-                return self.no_track_json_pixels, src
+            return None
 
     def distance(self, perDimension):
         return self.actualDimension * self.focalLength / perDimension
 
-    def test(self):
-        cap = cv2.VideoCapture(1)
+    def printOnImage(self, outimg, cube, width, height):
+        if outimg is not None and outimg.valid() and cube is not None:
+            x,y,w,h = cv2.boundingRect(cube.ct)
+            jevois.drawRect(outimg, int(x), int(y), int(w), int(h), 2, jevois.YUYV.MedPurple)
 
-        while(1):
-            # Take each frame
-            _, frame = cap.read()
-            cube, dst = self.find_cube(frame)
+            # box = cv2.boxPoints(cube.rect)
+            # box = numpy.int0(box)
 
-            cv2.imshow('dst', dst)
+            # jevois.drawLine(outimg, int(box[0][0,0]), int(box[0][0,1]),
+            #     int(box[1][0,0]), int(box[1][0,1]), 2, jevois.YUYV.MedPurple)
+            # jevois.drawLine(outimg, int(box[1][0,0]), int(box[1][0,1]),
+            #     int(box[2][0,0]), int(box[2][0,1]), 2, jevois.YUYV.MedPurple)
+            # jevois.drawLine(outimg, int(box[2][0,0]), int(box[2][0,1]),
+            #     int(box[3][0,0]), int(box[3][0,1]), 2, jevois.YUYV.MedPurple)
+            # jevois.drawLine(outimg, int(box[3][0,0]), int(box[3][0,1]),
+            #     int(box[0][0,0]), int(box[0][0,1]), 2, jevois.YUYV.MedPurple)
 
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
-            time.sleep(0.02)
+            jevois.writeText(outimg, "Angle: " + str(int(numpy.degrees(cube.angle))) + " Distance: " + str(int(cube.distance)),  3, height+1, jevois.YUYV.White, jevois.Font.Font6x10)
 
-        cap.release()
-        cv2.destroyAllWindows()
+    # ###################################################################################################
+    ## Process function with no USB output
+    def processNoUSB(self, inframe):
+        inimg = inframe.getCvBGR()
+        self.timer.start()
 
-#robot = FrcRobot()
-#robot.test()
+        cube = self.detect(inimg)
+        # Load camera calibration if needed:
+        # if not hasattr(self, 'camMatrix'): self.loadCameraCalibration(w, h)
+
+        if cube is not None:
+            jevois.sendSerial(cube.toJson())
+
+        self.timer.stop()
+
+    # ###################################################################################################
+    ## Process function with USB output
+    def process(self, inframe, outframe):
+        inimg = inframe.get()
+        self.timer.start()
+
+        imgbgr = jevois.convertToCvBGR(inimg)
+        h, w, chans = imgbgr.shape
+        outimg = outframe.get()
+        outimg.require("output", w, h + 12, jevois.V4L2_PIX_FMT_YUYV)
+        jevois.paste(inimg, outimg, 0, 0)
+        jevois.drawFilledRect(outimg, 0, h, outimg.width, outimg.height-h, jevois.YUYV.Black)
+        inframe.done()
+        
+        cube = self.detect(imgbgr, outimg)
+        # Load camera calibration if needed:
+        # if not hasattr(self, 'camMatrix'): self.loadCameraCalibration(w, h)
+
+        if cube is not None:
+            jevois.sendSerial(cube.toJson())
+
+        # Write frames/s info from our timer into the edge map (NOTE: does not account for output conversion time):
+        fps = self.timer.stop()
+        jevois.writeText(outimg, fps, 3, h-10, jevois.YUYV.White, jevois.Font.Font6x10)
+        outframe.send()
