@@ -8,12 +8,26 @@ class FrcRobot:
     # cubes
     class Cube:
         def __init__(self):
+            self.x = 0
+            self.y = 0
+            self.w = 0
+            self.h = 0
             self.track = 0
             self.angle = 0
             self.distance = 0
-            self.x = 0
-            self.y = 0
-            self.ct = None
+
+        def compute(self, width, focalLength, actualDimension, cameraDisplacement):
+            if self.track == 1:
+                return
+
+            # angle and distance from camera (angles in radians)
+            cA = numpy.arctan2(self.x + self.w / 2 - width / 2, focalLength)
+            cD = actualDimension * focalLength / self.w
+
+            # angle and distance after accounting for camera displacement (angles in radians)
+            self.track = 1
+            self.angle = numpy.arctan2(cD * numpy.sin(cA) + cameraDisplacement, cD * numpy.cos(cA))
+            self.distance = cD * numpy.cos(cA) / numpy.cos(self.angle)
 
         def toJson(self):
             pixels = {"Track" : 0, "Angle" : 0, "Range" : 0}
@@ -31,8 +45,8 @@ class FrcRobot:
         # all distance dimensions are in inches
         self.cameraDisplacement = 11.25
         self.actualDimension = 13.0
-        self.actualDistance = 60
-        self.pixelDimension = 160
+        self.actualDistance = 48
+        self.pixelDimension = 100
         self.focalLength = self.pixelDimension * self.actualDistance / self.actualDimension
 
         self.minArea = 2000
@@ -77,76 +91,44 @@ class FrcRobot:
             if area > self.minArea and area < self.maxArea:
                 # contour properties
                 x,y,w,h = cv2.boundingRect(ct)
-                extent = float(cv2.contourArea(ct)) / (w*h)
+                area = cv2.contourArea(ct)
+                #extent = float(area) / (w*h)
                 aspect_ratio = float(w)/h
 
                 if (aspect_ratio < self.maxAspectRatio and aspect_ratio > self.minAspectRatio): # and extent > self.minExtent):
-                    M = cv2.moments(ct)
-                    # location of the cube in pixels
-                    cX = int(M["m10"] / M["m00"])
-                    cY = int(M["m01"] / M["m00"])
-
-                    # angle and distance from camera (angles in radians)
-                    cA = numpy.arctan2(cX - width / 2, self.focalLength)
-                    cD = self.distance(h)
-
-                    # angle and distance after accounting for camera displacement (angles in radians)
-                    cA2 = numpy.arctan2(cD * numpy.sin(cA) + self.cameraDisplacement, cD * numpy.cos(cA))
-                    cD2 = cD * numpy.cos(cA) / numpy.cos(cA2)
-
                     cube = self.Cube()
-                    cube.track = 1
-                    cube.angle = cA2
-                    cube.range = cD2
-                    cube.x = cX
-                    cube.y = cY
-                    cube.ct = ct
+                    cube.x = x
+                    cube.y = y
+                    cube.w = w
+                    cube.h = h
                     cubes.append(cube)
-                    cube_distances.append(cD2)
+                    cube_distances.append(area)
 
         if len(cube_distances) > 0:
-            cube = cubes[numpy.argmin(cube_distances)]
+            cube = cubes[numpy.argmax(cube_distances)]
+            cube.compute(width, self.focalLength, self.actualDimension, self.cameraDisplacement)
             self.printOnImage(outimg, cube, width, height)
             return cube
         else:
             return None
 
-    def distance(self, perDimension):
-        return self.actualDimension * self.focalLength / perDimension
-
     def printOnImage(self, outimg, cube, width, height):
         if outimg is not None and outimg.valid() and cube is not None:
-            x,y,w,h = cv2.boundingRect(cube.ct)
-            jevois.drawRect(outimg, int(x), int(y), int(w), int(h), 2, jevois.YUYV.MedPurple)
-
-            # box = cv2.boxPoints(cube.rect)
-            # box = numpy.int0(box)
-
-            # jevois.drawLine(outimg, int(box[0][0,0]), int(box[0][0,1]),
-            #     int(box[1][0,0]), int(box[1][0,1]), 2, jevois.YUYV.MedPurple)
-            # jevois.drawLine(outimg, int(box[1][0,0]), int(box[1][0,1]),
-            #     int(box[2][0,0]), int(box[2][0,1]), 2, jevois.YUYV.MedPurple)
-            # jevois.drawLine(outimg, int(box[2][0,0]), int(box[2][0,1]),
-            #     int(box[3][0,0]), int(box[3][0,1]), 2, jevois.YUYV.MedPurple)
-            # jevois.drawLine(outimg, int(box[3][0,0]), int(box[3][0,1]),
-            #     int(box[0][0,0]), int(box[0][0,1]), 2, jevois.YUYV.MedPurple)
-
-            jevois.writeText(outimg, "Angle: " + str(int(numpy.degrees(cube.angle))) + " Distance: " + str(int(cube.distance)),  3, height+1, jevois.YUYV.White, jevois.Font.Font6x10)
+            jevois.drawRect(outimg, cube.x, cube.y, cube.w, cube.h, 2, jevois.YUYV.MedPurple)
+            jevois.writeText(outimg, "Angle: " + str(int(numpy.degrees(cube.angle))) + 
+                " Distance: " + str(int(cube.distance)) +
+                " Pixel width: " + str(cube.w),  
+                3, height+1, jevois.YUYV.White, jevois.Font.Font6x10)
 
     # ###################################################################################################
     ## Process function with no USB output
     def processNoUSB(self, inframe):
         inimg = inframe.getCvBGR()
-        self.timer.start()
-
         cube = self.detect(inimg)
         # Load camera calibration if needed:
         # if not hasattr(self, 'camMatrix'): self.loadCameraCalibration(w, h)
-
         if cube is not None:
             jevois.sendSerial(cube.toJson())
-
-        self.timer.stop()
 
     # ###################################################################################################
     ## Process function with USB output
