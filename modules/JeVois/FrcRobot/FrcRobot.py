@@ -16,7 +16,7 @@ class FrcRobot:
             self.angle = 0
             self.distance = 0
 
-        def compute(self, width, focalLength, actualDimension, cameraDisplacement):
+        def compute(self, width, focalLength, actualDimension, cameraDisplacement, armDisplacement):
             if self.track == 1:
                 return
 
@@ -27,7 +27,7 @@ class FrcRobot:
             # angle and distance after accounting for camera displacement (angles in radians)
             self.track = 1
             self.angle = numpy.arctan2(cD * numpy.sin(cA) + cameraDisplacement, cD * numpy.cos(cA))
-            self.distance = cD * numpy.cos(cA) / numpy.cos(self.angle)
+            self.distance = cD * numpy.cos(cA) / numpy.cos(self.angle) - armDisplacement
 
         def toJson(self):
             pixels = {"Track" : 0, "Angle" : 0, "Range" : 0}
@@ -44,9 +44,10 @@ class FrcRobot:
 
         # all distance dimensions are in inches
         self.cameraDisplacement = 11.25
-        self.actualDimension = 13.0
-        self.actualDistance = 48
-        self.pixelDimension = 100
+        self.armDisplacement = 15
+        self.actualDimension = 17.0
+        self.actualDistance = 82
+        self.pixelDimension = 78
         self.focalLength = self.pixelDimension * self.actualDistance / self.actualDimension
 
         self.minArea = 2000
@@ -55,6 +56,8 @@ class FrcRobot:
         self.maxAspectRatio = 1.4
         self.minExtent = 0.6
 
+        self.recentAngles = [0, 0, 0, 0]
+        self.recentDistances = [0, 0, 0, 0]
         self.timer = jevois.Timer("FrcRobot", 100, jevois.LOG_INFO)
 
     # ###################################################################################################
@@ -106,7 +109,8 @@ class FrcRobot:
 
         if len(cube_distances) > 0:
             cube = cubes[numpy.argmax(cube_distances)]
-            cube.compute(width, self.focalLength, self.actualDimension, self.cameraDisplacement)
+            cube.compute(width, self.focalLength, self.actualDimension, self.cameraDisplacement, self.armDisplacement)
+            self.smooth(cube)
             self.printOnImage(outimg, cube, width, height)
             return cube
         else:
@@ -119,6 +123,14 @@ class FrcRobot:
                 " Distance: " + str(int(cube.distance)) +
                 " Pixel width: " + str(cube.w),  
                 3, height+1, jevois.YUYV.White, jevois.Font.Font6x10)
+
+    def smooth(self, cube):
+        self.recentAngles.pop(0)
+        self.recentDistances.pop(0)
+        self.recentAngles.append(cube.angle)
+        self.recentDistances.append(cube.distance)
+        cube.angle = numpy.mean(self.recentAngles)
+        cube.distance = numpy.mean(self.recentDistances)
 
     # ###################################################################################################
     ## Process function with no USB output
